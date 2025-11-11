@@ -21,6 +21,7 @@ library(R2jags)
 library(loo)
 library(ggdist)
 library(purrr)
+library(loo)
 
 # Getting data ready ------
 data = read_excel("data.xlsx")
@@ -175,231 +176,317 @@ ggsave("Levins.png", plot = fig3,
 kruskal.test(Levins ~ Env, data = df_levins)
 dunnTest(Levins ~ Env, data = df_levins, method = "bonferroni")
 
-# Bayesian PSi values ---------------------------------------
-## Stream IS Bayes -----------------------
+# Bayesian PSi Models --------------------
+diet_mat <- as.matrix(data_filtered[, 13:34]) 
+N  <- nrow(diet_mat)
+J  <- ncol(diet_mat)
 
-sink("multinom.dir.hier.txt")
+data_filtered$Env <- factor(data_filtered$Env,
+                            levels = c("Stream", "Pool", "Ditch"))
+hab <- as.numeric(data_filtered$Env)
+H <- length(levels(data_filtered$Env))  
+
+data_filtered$Sex <- factor(data_filtered$Sex,
+                            levels = c("M", "F", "I"))
+sex <- as.numeric(data_filtered$Sex)
+S <- length(levels(data_filtered$Sex)) 
+
+ni <- apply(diet_mat, 1, sum)
+
+SL <- data_filtered$SL
+
+hSL <- hist(SL, breaks = "Sturges", plot = FALSE)
+breaks_SL <- hSL$breaks
+
+size_class <- cut(SL,
+                  breaks = breaks_SL,
+                  include.lowest = TRUE,
+                  labels = FALSE)
+
+size_class[is.na(size_class)] <- max(size_class, na.rm = TRUE)
+
+K <- max(size_class)   
+
+jags_data_base <- list(
+  yi   = diet_mat,
+  N    = N,
+  J    = J,
+  ni   = ni,
+  hab  = hab,
+  H    = H,
+  sex  = sex,
+  S    = S,
+  size = size_class,
+  K    = K
+)
+
+## Habitat Model ------------------------
+sink("multinom_habitat.txt")
 cat("
-    data{
-    for (i in 1:N) { 
-    ni[i]  <- sum(yi[i,1:J]) # calcula o numero de presas de cada individuo
-    }} model {
-    for (i in 1:N) {
-    yi[i, 1:J] ~ dmulti(pi[i,1:J], ni[i])
-    pi[i, 1:J] ~ ddirch(alphapop[1:J])
-    }
+model {
+  for (i in 1:N) {
+    yi[i,1:J] ~ dmulti(pi[i,1:J], ni[i])
+    pi[i,1:J] ~ ddirch(alphahab[hab[i], 1:J])
+  }
+
+  for (h in 1:H) {
     for (j in 1:J) {
-    alphapop[j]  <- q[j] * w + 0.05 
-    # os components de alphapop sao determinados pela dieta media da pop (q)
-    # e o parametro de concentracao (w)
+      alphahab[h, j] <- q[h, j] * w[h] + 0.05
     }
-    q[1:J] ~ ddirch(alpha[]) # # define uma distribuicao 
-                             # uniforme a priori para q
-    for (j in 1:J){
-    alpha[j]  <- 1 }
-    w ~ dunif(0.1, 30) # define o prior de w
-    ### calculate PSi 
-    for (i in 1:N){
-    for(j in 1:J){
-    diff.prop[i,j]  <- abs(pi[i, j] - q[j]) }
-    PS[i]  <- 1 - 0.5 * sum(diff.prop[i,1:J]) }
-    mean.PS  <- mean(PS[])
-    for (i in 1:N){
-    log_lik[i] <- logdensity.multi(yi[i, ], pi[i, ], ni[i]) }
+    q[h, 1:J] ~ ddirch(alpha[])
+    w[h] ~ dunif(0.1, 30)
+  }
+
+  for (j in 1:J) {
+    alpha[j] <- 1
+  }
+
+  for (i in 1:N) {
+    for (j in 1:J) {
+      diff.prop[i,j] <- abs(pi[i,j] - q[hab[i], j])
     }
-    ",fill = TRUE)
+    PS[i] <- 1 - 0.5 * sum(diff.prop[i,1:J])
+    log_lik[i] <- logdensity.multi(yi[i,], pi[i,], ni[i])
+  }
+
+  mean.PS <- mean(PS[])
+}
+", fill = TRUE)
 sink()
 
-stream.Jags = list(
-  yi = as.matrix(stream_diet), 
-  N  = nrow(stream_diet),     
-  J  = 22
+inits_fun <- function() {
+  q_init <- matrix(NA, nrow = jags_data_base$H, ncol = jags_data_base$J)
+  for (h in 1:jags_data_base$H) {
+    idx <- which(jags_data_base$hab == h)
+    sub_y <- jags_data_base$yi[idx, , drop = FALSE]
+    tot_ind <- apply(sub_y, 1, sum)
+    q_obs <- apply(sub_y, 2, sum) / sum(tot_ind)
+    q_obs[q_obs == 0] <- 1e-6
+    q_obs <- q_obs / sum(q_obs)
+    q_init[h, ] <- q_obs
+  }
+  list(q = q_init, w = rep(1, jags_data_base$H))
+}
+
+params  <- c("pi", "q", "w", "PS", "log_lik", "mean.PS")
+
+mod_hab <- jags(
+  data = jags_data_base,
+  inits = inits_fun,
+  parameters.to.save = params,
+  model.file = "multinom_habitat.txt",
+  n.chains = 3,
+  n.iter = 2000,
+  n.burnin = 1000,
+  n.thin = 100,
+  DIC = TRUE
 )
 
-Nprey.ind  = apply(stream_diet, 1, sum)            
-q = as.numeric(apply(stream_diet, 2, 
-                     function(x){sum(x)/sum(Nprey.ind)})) 
-
-q_obs <- as.numeric(apply(stream_diet, 2, function(x) sum(x) / sum(Nprey.ind)))
-q_obs[q_obs == 0] <- 1e-6                
-q_obs <- q_obs / sum(q_obs)            
-
-inits = function(){ list(q = q_obs, w = 1) }
-
-params = c("pi", "q", "w", "PS") 
-
-bayes.mod.stream = jags(stream.Jags, inits, params, model.file="multinom.dir.hier.txt",
-                        n.chains=3, n.iter=2000, n.burnin=1000,
-                        n.thin=100, DIC=TRUE, progress.bar = "text", digits=5)
-
-N <- nrow(stream_diet)
-sumj <- bayes.mod.stream$BUGSoutput$summary
-idx  <- grep("^PS\\[", rownames(sumj))
-PSibayes_stream <- sumj[idx, "mean"]
-
-PSibayes.df_stream <- data.frame(
-  individuo = 1:length(PSibayes_stream),
-  PS = PSibayes_stream
-)
-
-View(PSibayes.df_stream)
-
-ISbayes_stream = mean(PSibayes_stream)
-ISbayes_stream # 0.6015
-
-## Pool PSi Bayes -----------------------
-
-sink("multinom.dir.hier.txt")
+## Habitat + Sex --------------------------
+sink("multinom_habitat_sex.txt")
 cat("
-    data{
-    for (i in 1:N) { 
-    ni[i]  <- sum(yi[i,1:J]) # calcula o numero de presas de cada individuo
-    }} model {
-    for (i in 1:N) {
-    yi[i, 1:J] ~ dmulti(pi[i,1:J], ni[i])
-    pi[i, 1:J] ~ ddirch(alphapop[1:J])
+model {
+  for (i in 1:N) {
+    yi[i,1:J] ~ dmulti(pi[i,1:J], ni[i])
+    pi[i,1:J] ~ ddirch(alphasex[hab[i], sex[i], 1:J])
+  }
+
+  for (h in 1:H) {
+    for (s in 1:S) {
+      for (j in 1:J) {
+        alphasex[h,s,j] <- q[h,s,j] * w[h,s] + 0.05
+      }
+      q[h,s,1:J] ~ ddirch(alpha[])
+      w[h,s] ~ dunif(0.1, 30)
     }
+  }
+
+  for (j in 1:J) {
+    alpha[j] <- 1
+  }
+
+  for (i in 1:N) {
     for (j in 1:J) {
-    alphapop[j]  <- q[j] * w + 0.05 
-    # os components de alphapop sao determinados pela dieta media da pop (q)
-    # e o parametro de concentracao (w)
+      diff.prop[i,j] <- abs(pi[i,j] - q[hab[i], sex[i], j])
     }
-    q[1:J] ~ ddirch(alpha[]) # # define uma distribuicao 
-                             # uniforme a priori para q
-    for (j in 1:J){
-    alpha[j]  <- 1 }
-    w ~ dunif(0.1, 30) # define o prior de w
-    ### calculate PSi 
-    for (i in 1:N){
-    for(j in 1:J){
-    diff.prop[i,j]  <- abs(pi[i, j] - q[j]) }
-    PS[i]  <- 1 - 0.5 * sum(diff.prop[i,1:J]) }
-    mean.PS  <- mean(PS[])
-    for (i in 1:N){
-    log_lik[i] <- logdensity.multi(yi[i, ], pi[i, ], ni[i]) }
-    }
-    ",fill = TRUE)
+    PS[i] <- 1 - 0.5 * sum(diff.prop[i,1:J])
+    log_lik[i] <- logdensity.multi(yi[i,], pi[i,], ni[i])
+  }
+
+  mean.PS <- mean(PS[])
+}
+", fill = TRUE)
 sink()
 
-pool.Jags = list(
-  yi = as.matrix(pool_diet), 
-  N  = nrow(pool_diet),     
-  J  = 22
+inits_fun2 <- function() {
+  H <- jags_data_base$H
+  S <- jags_data_base$S
+  J <- jags_data_base$J
+  
+  q_init <- array(NA, dim = c(H, S, J))
+  w_init <- array(1, dim = c(H, S))
+  
+  for (h in 1:H) {
+    for (s in 1:S) {
+      idx <- which(jags_data_base$hab == h & jags_data_base$sex == s)
+      if (length(idx) > 0) {
+        sub_y <- jags_data_base$yi[idx, , drop = FALSE]
+        tot_ind <- apply(sub_y, 1, sum)
+        q_obs <- apply(sub_y, 2, sum) / sum(tot_ind)
+        q_obs[q_obs == 0] <- 1e-6
+        q_obs <- q_obs / sum(q_obs)
+      } else {
+        q_obs <- rep(1/J, J)
+      }
+      q_init[h, s, ] <- q_obs
+    }
+  }
+  
+  list(q = q_init, w = w_init)
+}
+
+params2 <- c("pi", "q", "w", "PS", "log_lik", "mean.PS")
+
+mod_hab_sex <- jags(
+  data = jags_data_base,
+  inits = inits_fun2,
+  parameters.to.save = params2,
+  model.file = "multinom_habitat_sex.txt",
+  n.chains = 3,
+  n.iter = 2000,
+  n.burnin = 1000,
+  n.thin = 100,
+  DIC = TRUE
 )
 
-Nprey.ind  = apply(pool_diet, 1, sum)            
-q = as.numeric(apply(pool_diet, 2, 
-                     function(x){sum(x)/sum(Nprey.ind)})) 
-
-q_obs <- as.numeric(apply(pool_diet, 2, function(x) sum(x) / sum(Nprey.ind)))
-q_obs[q_obs == 0] <- 1e-6                
-q_obs <- q_obs / sum(q_obs)            
-
-inits = function(){ list(q = q_obs, w = 1) }
-
-params = c("pi", "q", "w", "PS") 
-
-bayes.mod.pool = jags(pool.Jags, inits, params, model.file="multinom.dir.hier.txt",
-                      n.chains=3, n.iter=2000, n.burnin=1000,
-                      n.thin=100, DIC=TRUE, progress.bar = "text", digits=5)
-
-N <- nrow(pool_diet)
-sumj <- bayes.mod.pool$BUGSoutput$summary
-idx  <- grep("^PS\\[", rownames(sumj))
-PSibayes_pool <- sumj[idx, "mean"]
-
-PSibayes.df_pool <- data.frame(
-  individuo = 1:length(PSibayes_pool),
-  PS = PSibayes_pool
-)
-
-View(PSibayes.df_pool)
-
-ISbayes_pool = mean(PSibayes_pool)
-ISbayes_pool # IS = 0.6078
-
-## Ditch PSi Bayes --------------------------
-
-sink("multinom.dir.hier.txt")
+## Habitat + Sex + Standard length -------------------
+sink("multinom_habitat_sex_size.txt")
 cat("
-    data{
-    for (i in 1:N) { 
-    ni[i]  <- sum(yi[i,1:J]) # calcula o numero de presas de cada individuo
-    }} model {
-    for (i in 1:N) {
-    yi[i, 1:J] ~ dmulti(pi[i,1:J], ni[i])
-    pi[i, 1:J] ~ ddirch(alphapop[1:J])
+model {
+  for (i in 1:N) {
+    yi[i,1:J] ~ dmulti(pi[i,1:J], ni[i])
+    pi[i,1:J] ~ ddirch(alphasize[hab[i], sex[i], size[i], 1:J])
+  }
+
+
+  for (h in 1:H) {
+    for (s in 1:S) {
+      for (k in 1:K) {
+        for (j in 1:J) {
+          alphasize[h,s,k,j] <- q[h,s,k,j] * w[h,s,k] + 0.05
+        }
+      
+        q[h,s,k,1:J] ~ ddirch(alpha[])
+      
+        w[h,s,k] ~ dunif(0.1, 30)
+      }
     }
+  }
+
+  # prior Dirichlet base
+  for (j in 1:J) {
+    alpha[j] <- 1
+  }
+
+  for (i in 1:N) {
     for (j in 1:J) {
-    alphapop[j]  <- q[j] * w + 0.05 
-    # os components de alphapop sao determinados pela dieta media da pop (q)
-    # e o parametro de concentracao (w)
+      diff.prop[i,j] <- abs(pi[i,j] - q[hab[i], sex[i], size[i], j])
     }
-    q[1:J] ~ ddirch(alpha[]) # # define uma distribuicao 
-                             # uniforme a priori para q
-    for (j in 1:J){
-    alpha[j]  <- 1 }
-    w ~ dunif(0.1, 30) # define o prior de w
-    ### calculate PSi 
-    for (i in 1:N){
-    for(j in 1:J){
-    diff.prop[i,j]  <- abs(pi[i, j] - q[j]) }
-    PS[i]  <- 1 - 0.5 * sum(diff.prop[i,1:J]) }
-    mean.PS  <- mean(PS[])
-    for (i in 1:N){
-    log_lik[i] <- logdensity.multi(yi[i, ], pi[i, ], ni[i]) }
-    }
-    ",fill = TRUE)
+    PS[i] <- 1 - 0.5 * sum(diff.prop[i,1:J])
+    log_lik[i] <- logdensity.multi(yi[i,], pi[i,], ni[i])
+  }
+
+  mean.PS <- mean(PS[])
+}
+", fill = TRUE)
 sink()
 
-ditch.Jags = list(
-  yi = as.matrix(ditch_diet), 
-  N  = nrow(ditch_diet),     
-  J  = 22
+inits_fun3 <- function() {
+  H <- jags_data_base$H
+  S <- jags_data_base$S
+  K <- jags_data_base$K
+  J <- jags_data_base$J
+  
+  q_init <- array(NA, dim = c(H, S, K, J))
+  w_init <- array(1, dim = c(H, S, K))
+  
+  for (h in 1:H) {
+    for (s in 1:S) {
+      for (k in 1:K) {
+        idx <- which(jags_data_base$hab == h &
+                       jags_data_base$sex == s &
+                       jags_data_base$size == k)
+        if (length(idx) > 0) {
+          sub_y <- jags_data_base$yi[idx, , drop = FALSE]
+          tot_ind <- apply(sub_y, 1, sum)
+          q_obs <- apply(sub_y, 2, sum) / sum(tot_ind)
+          q_obs[q_obs == 0] <- 1e-6
+          q_obs <- q_obs / sum(q_obs)
+        } else {
+          
+          q_obs <- rep(1/J, J)
+        }
+        q_init[h, s, k, ] <- q_obs
+      }
+    }
+  }
+  
+  list(q = q_init, w = w_init)
+}
+
+params3 <- c("pi", "q", "w", "PS", "log_lik", "mean.PS")
+
+mod_hab_sex_size <- jags(
+  data = jags_data_base,
+  inits = inits_fun3,
+  parameters.to.save = params3,
+  model.file = "multinom_habitat_sex_size.txt",
+  n.chains = 3,
+  n.iter = 2000,
+  n.burnin = 1000,
+  n.thin = 100,
+  DIC = TRUE
 )
 
-Nprey.ind  = apply(ditch_diet, 1, sum)            
-q = as.numeric(apply(ditch_diet, 2, 
-                     function(x){sum(x)/sum(Nprey.ind)})) 
+## Comparing models -----------------------------
+loglik1 <- mod_hab$BUGSoutput$sims.list$log_lik
+loglik2 <- mod_hab_sex$BUGSoutput$sims.list$log_lik
+loglik3 <- mod_hab_sex_size$BUGSoutput$sims.list$log_lik
 
-q_obs <- as.numeric(apply(ditch_diet, 2, function(x) sum(x) / sum(Nprey.ind)))
-q_obs[q_obs == 0] <- 1e-6                
-q_obs <- q_obs / sum(q_obs)            
+loo1 <- loo(loglik1)
+loo2 <- loo(loglik2)
+loo3 <- loo(loglik3)
 
-inits = function(){ list(q = q_obs, w = 1) }
+loo1
+loo2
+loo3
 
-params = c("pi", "q", "w", "PS") 
+loo_compare(loo1, loo2, loo3)
 
-bayes.mod.ditch = jags(ditch.Jags, inits, params, model.file="multinom.dir.hier.txt",
-                       n.chains=3, n.iter=2000, n.burnin=1000,
-                       n.thin=100, DIC=TRUE, progress.bar = "text", digits=5)
-
-N <- nrow(ditch_diet)
-sumj <- bayes.mod.ditch$BUGSoutput$summary
+## PSi and IS values --------------------
+sumj <- mod_hab$BUGSoutput$summary
 idx  <- grep("^PS\\[", rownames(sumj))
-PSibayes_ditch<- sumj[idx, "mean"]
-
-PSibayes.df_ditch <- data.frame(
-  individuo = 1:length(PSibayes_ditch),
-  PS = PSibayes_ditch
+PSibayes <- sumj[idx, "mean"]  
+PSibayes_df <- data.frame(
+  individuo = 1:length(PSibayes),
+  PS = PSibayes,
+  Env = data_filtered$Env
 )
 
-View(PSibayes.df_ditch)
+IS_by_hab <- PSibayes_df %>%
+  group_by(Env) %>%
+  summarise(IS = mean(PS, na.rm = TRUE))
 
-ISbayes_ditch = mean(PSibayes_ditch)
-ISbayes_ditch # IS = 0.5850
+IS_by_hab 
 
-# Figure 4 -------------------------
-PS_stream <- PSibayes.df_stream %>%
-  mutate(Habitat = "Stream")
-PS_pool <- PSibayes.df_pool %>%
-  mutate(Habitat = "Pool")
-PS_ditch <- PSibayes.df_ditch %>%
-  mutate(Habitat = "Ditch")
-
-df_PSi <- bind_rows(PS_stream, PS_pool, PS_ditch)
+## Figure 4 --------------------------
+df_PSi <- data.frame(
+  PS = PSibayes,
+  Env = data_filtered$Env   
+)
 
 df_PSi <- df_PSi %>%
+  rename(Habitat = Env) %>%
   mutate(PS = as.numeric(PS))
 
 df_PSi_summary <- df_PSi %>%
@@ -408,19 +495,24 @@ df_PSi_summary <- df_PSi %>%
     mean_PS = mean(PS, na.rm = TRUE),
     sd_PS   = sd(PS, na.rm = TRUE),
     var_PS  = var(PS, na.rm = TRUE),
-    n       = n()
+    n       = n(),
+    .groups = "drop"
   )
 
 df_PSi_summary
 
-data_filtered$PS = df_PSi$PS
+data_filtered$PS <- df_PSi$PS
 
-fig4 = data_filtered %>%
+data_filtered$Env <- factor(data_filtered$Env,
+                            levels = rev(c("Stream", "Pool", "Ditch")))
+
+fig4 <- data_filtered %>%
   ggplot(aes(x = PS, y = Env, fill = Env)) +
   ggdist::stat_halfeye(alpha = 0.8, adjust = 1.5, width = 0.7,
-                       show.legend = F) +
-  scale_fill_manual(values = c("Stream" = "#009E73", "Pool" = "#0072B2",
-                               "Ditch" = "#E69F00")) +
+                       show.legend = FALSE) +
+  scale_fill_manual(values = c("Stream" = "#009E73",
+                               "Pool"   = "#0072B2",
+                               "Ditch"  = "#E69F00")) +
   labs(x = expression(PS[i]), y = NULL) +
   theme_classic(base_size = 18)
 
@@ -497,7 +589,7 @@ fig5 = ggplot(coef_df,
     scales = "fixed",
     labeller = as_labeller(c(
       "SL" = "SL",
-      "Index ventral" = "IVF",
+      "Index ventral" = "VFI",
       "Rel. eye posit" = "REP"
     ))
   ) +
