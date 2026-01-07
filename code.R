@@ -22,39 +22,27 @@ library(loo)
 library(ggdist)
 library(purrr)
 library(loo)
+library(diptest)
+library(mclust)
 
 # Getting data ready ------
-data = read_excel("data.xlsx")
+data = read_excel("data_final.xlsx")
 str(data)
-data$S = specnumber(data[,13:34])
 
-data_filtered = 
-  data %>% 
-  filter(S > 0 )
+data <- data %>%
+  mutate(across(
+    .cols = -c(Env, Sex),    
+    .fns  = ~ as.numeric(.x)  
+  ))
 
-data_filtered %>%
+data %>%
   group_by(Env) %>%
   summarise(n = n())
 
-data_filtered$Env <- factor(data_filtered$Env, 
+data$Env <- factor(data$Env, 
                             levels = c("Stream", "Pool", "Ditch"))
 
-data_filtered <- data_filtered %>%
-  dplyr::filter(Env == "Stream") %>%
-  bind_rows(data %>% dplyr::filter(Env == "Pool")) %>%
-  bind_rows(data %>% dplyr::filter(Env == "Ditch"))
-
-data_filtered = 
-  data_filtered %>% 
-  filter(S > 0 )
-
-data_filtered <- data_filtered |>
-  mutate(
-    SL = na_if(SL, "*"), 
-    SL = as.numeric(SL)     
-  )
-
-data_filtered %>%
+data %>%
   group_by(Env) %>%
   summarise(
     min_SL = min(SL, na.rm = TRUE),
@@ -64,25 +52,25 @@ data_filtered %>%
     n = n()
   )
 
-stream = data_filtered %>% 
+stream = data %>% 
   filter(Env == "Stream")
 
-stream_diet = stream[,13:34]
+stream_diet = stream[,13:25]
 
-pool = data_filtered %>% 
+pool = data %>% 
   filter(Env == "Pool")
 
-pool_diet = pool[,13:34]
+pool_diet = pool[,13:25]
 
-ditch  = data_filtered %>% 
+ditch  = data %>% 
   filter(Env == "Ditch")
 
-ditch_diet = ditch[,13:34]
+ditch_diet = ditch[,13:25]
 
 # Frequency of occurrence ---------------------
-data_filtered$Env <- factor(data_filtered$Env)
-diet_total = decostand(data_filtered[,13:34], method = "pa")
-diet_df <- cbind(Env = data_filtered$Env, diet_total)
+data$Env <- factor(data$Env)
+diet_total = decostand(data[,13:25], method = "pa")
+diet_df <- cbind(Env = data$Env, diet_total)
 diet_long <- diet_df %>%
   pivot_longer(-Env, names_to = "Item", values_to = "Presence")
 diet_fo <- diet_long %>%
@@ -120,13 +108,13 @@ fig2 = ggplot(diet_fo, aes(x = reorder(Item, -FO), y = FO, fill = Env)) +
     legend.key.size = unit(1.8, "lines")      
   )
 
-ggsave("freq_occurrence.png", plot = fig2,
+ggsave("Figure_2.png", plot = fig2,
        width = 10, height = 8, dpi = 300, units = "in")
 
 # PERMANOVA & Niche breadth --------------------
-diet_total = decostand(data_filtered[,13:34], method = "pa")
+diet_total = decostand(data[,13:25], method = "pa")
 diss_mat <- vegdist(diet_total, method = "jaccard", binary = TRUE)
-perm = adonis2(diss_mat ~ Env, data = data_filtered, permutations = 999)
+perm = adonis2(diss_mat ~ Env, data = data, permutations = 999)
 perm
 pairwise.perm.manova(diss_mat, data_filtered$Env, nperm = 999)
 
@@ -144,7 +132,7 @@ levins_B <- function(x) {
 levins_values <- apply(diet_total, 1, levins_B)
 
 df_levins <- data.frame(
-  Env = data_filtered$Env,            
+  Env = data$Env,            
   Levins = levins_values  
 )
 
@@ -168,32 +156,46 @@ fig3 = ggplot(summary_levins, aes(x = Env, y = mean_levins, fill = Env)) +
   scale_fill_manual(values = c("Stream" = "#009E73", 
                                "Pool" = "#0072B2", 
                                "Ditch" = "#E69F00"))+
-  scale_y_continuous(expand = c(0,0), limits = c(0, 0.11))
+  scale_y_continuous(expand = c(0,0), limits = c(0, 0.17))
 
-ggsave("Levins.png", plot = fig3,
+ggsave("Figure_3.jpg", plot = fig3,
        width = 6, height = 4, dpi = 300, units = "in")
 
 kruskal.test(Levins ~ Env, data = df_levins)
 dunnTest(Levins ~ Env, data = df_levins, method = "bonferroni")
 
 # Bayesian PSi Models --------------------
-diet_mat <- as.matrix(data_filtered[, 13:34]) 
+diet_mat_perc <- as.matrix(data[, 13:25])
+diet_mat_counts <- round(diet_mat_perc)
+row_sums <- rowSums(diet_mat_counts)
+
+for (i in seq_len(nrow(diet_mat_counts))) {
+  diff <- 100 - row_sums[i]
+  if (diff != 0) {
+    j <- which.max(diet_mat_counts[i, ])
+    diet_mat_counts[i, j] <- diet_mat_counts[i, j] + diff
+  }
+}
+
+rowSums(diet_mat_counts)
+diet_mat <- diet_mat_counts
+
 N  <- nrow(diet_mat)
 J  <- ncol(diet_mat)
 
-data_filtered$Env <- factor(data_filtered$Env,
+data$Env <- factor(data$Env,
                             levels = c("Stream", "Pool", "Ditch"))
-hab <- as.numeric(data_filtered$Env)
-H <- length(levels(data_filtered$Env))  
+hab <- as.numeric(data$Env)
+H <- length(levels(data$Env))  
 
-data_filtered$Sex <- factor(data_filtered$Sex,
+data$Sex <- factor(data$Sex,
                             levels = c("M", "F", "I"))
-sex <- as.numeric(data_filtered$Sex)
-S <- length(levels(data_filtered$Sex)) 
+sex <- as.numeric(data$Sex)
+S <- length(levels(data$Sex)) 
 
 ni <- apply(diet_mat, 1, sum)
 
-SL <- data_filtered$SL
+SL <- data$SL
 
 hSL <- hist(SL, breaks = "Sturges", plot = FALSE)
 breaks_SL <- hSL$breaks
@@ -453,15 +455,15 @@ loglik1 <- mod_hab$BUGSoutput$sims.list$log_lik
 loglik2 <- mod_hab_sex$BUGSoutput$sims.list$log_lik
 loglik3 <- mod_hab_sex_size$BUGSoutput$sims.list$log_lik
 
-loo1 <- loo(loglik1)
-loo2 <- loo(loglik2)
-loo3 <- loo(loglik3)
+waic1 <- waic(loglik1)
+waic2 <- waic(loglik2)
+waic3 <- waic(loglik3)
 
-loo1
-loo2
-loo3
+waic1
+waic2
+waic3
 
-loo_compare(loo1, loo2, loo3)
+loo_compare(waic1, waic2, waic3)
 
 ## PSi and IS values --------------------
 sumj <- mod_hab$BUGSoutput$summary
@@ -470,7 +472,7 @@ PSibayes <- sumj[idx, "mean"]
 PSibayes_df <- data.frame(
   individuo = 1:length(PSibayes),
   PS = PSibayes,
-  Env = data_filtered$Env
+  Env = data$Env
 )
 
 IS_by_hab <- PSibayes_df %>%
@@ -482,7 +484,7 @@ IS_by_hab
 ## Figure 4 --------------------------
 df_PSi <- data.frame(
   PS = PSibayes,
-  Env = data_filtered$Env   
+  Env = data$Env   
 )
 
 df_PSi <- df_PSi %>%
@@ -501,12 +503,12 @@ df_PSi_summary <- df_PSi %>%
 
 df_PSi_summary
 
-data_filtered$PS <- df_PSi$PS
+data$PS <- df_PSi$PS
 
-data_filtered$Env <- factor(data_filtered$Env,
+data$Env <- factor(data$Env,
                             levels = rev(c("Stream", "Pool", "Ditch")))
 
-fig4 <- data_filtered %>%
+fig4 <- data %>%
   ggplot(aes(x = PS, y = Env, fill = Env)) +
   ggdist::stat_halfeye(alpha = 0.8, adjust = 1.5, width = 0.7,
                        show.legend = FALSE) +
@@ -521,91 +523,48 @@ fig4
 ggsave("Figure_4.png", plot = fig4,
        width = 6, height = 5, dpi = 300, units = "in")
 
-# Morphometrics X PSi -----------------------------
-data_filtered$SL = as.numeric(data_filtered$SL)
-data_filtered$Env <- fct_rev(data_filtered$Env)
-data_filtered$SL
-data_filtered$index_vental_flat
-data_filtered$rel_eye_posit
 
-stream_data <- filter(data_filtered, Env == "Stream")
+PS_stream <- data$PS[data$Env == "Stream"]
+PS_pool   <- data$PS[data$Env == "Pool"]
+PS_ditch  <- data$PS[data$Env == "Ditch"]
+
+dip_stream <- dip.test(PS_stream)
+dip_pool   <- dip.test(PS_pool)
+dip_ditch  <- dip.test(PS_ditch)
+
+dip_stream
+dip_pool
+dip_ditch
+
+M_stream <- Mclust(PS_stream)
+M_pool   <- Mclust(PS_pool)
+M_ditch  <- Mclust(PS_ditch)
+
+summary(M_stream)
+summary(M_pool)
+summary(M_ditch)
+
+# Morphometrics X PSi -----------------------------
+data$SL = as.numeric(data$SL)
+data$Env <- fct_rev(data$Env)
+data$SL
+data$index_vental_flat
+data$rel_eye_posit
+
+stream_data <- filter(data, Env == "Stream")
 mod_stream <- betareg(PS ~ SL + index_vental_flat + rel_eye_posit,
                       data = stream_data)
 summary(mod_stream)
 vif(mod_stream)
 
-pool_data <- filter(data_filtered, Env == "Pool")
+pool_data <- filter(data, Env == "Pool")
 mod_pool <- betareg(PS ~ SL + index_vental_flat + rel_eye_posit,
                     data = pool_data)
 summary(mod_pool)
 vif(mod_pool)
 
-ditch_data <- filter(data_filtered, Env == "Ditch")
+ditch_data <- filter(data, Env == "Ditch")
 mod_ditch <- betareg(PS ~ SL + index_vental_flat + rel_eye_posit,
                      data = ditch_data)
 summary(mod_ditch)
 vif(mod_ditch)
-
-## Figure 5 -------------------------
-mods <- list(
-  Stream = mod_stream,
-  Pool   = mod_pool,
-  Ditch  = mod_ditch
-)
-
-coef_df <- imap_dfr(mods, ~{
-  sm <- summary(.x)
-  tab <- sm$coefficients$mean 
-  as.data.frame(tab) |>
-    mutate(term = rownames(tab),
-           Habitat = .y)
-})
-
-coef_df <- coef_df |>
-  filter(term != "(Intercept)") |>
-  mutate(
-    lower = Estimate - 1.96 * `Std. Error`,
-    upper = Estimate + 1.96 * `Std. Error`,
-    sig   = `Pr(>|z|)` < 0.05
-  )
-
-coef_df$term <- factor(coef_df$term,
-                       levels = c("SL", "index_vental_flat", "rel_eye_posit"),
-                       labels = c("SL", "Index ventral", "Rel. eye posit"))
-
-xmax <- max(abs(c(coef_df$lower, coef_df$upper)), na.rm = TRUE)
-
-fig5 = ggplot(coef_df,
-       aes(x = Estimate, y = Habitat)) +
-  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
-  geom_errorbarh(aes(xmin = lower, xmax = upper),
-                 height = 0, color = "black") +
-  geom_point(aes(fill = sig),
-             size = 3.8, shape = 21, show.legend = FALSE) +
-  scale_fill_manual(values = c(`TRUE` = "firebrick", `FALSE` = "grey40")) +
-  facet_wrap(
-    ~ term,
-    nrow = 1,
-    scales = "fixed",
-    labeller = as_labeller(c(
-      "SL" = "SL",
-      "Index ventral" = "VFI",
-      "Rel. eye posit" = "REP"
-    ))
-  ) +
-  coord_cartesian(xlim = c(-xmax, xmax)) +
-  labs(
-    x = "Coefficient estimate (logit link)",
-    y = NULL
-  )+
-  theme_bw(base_size = 18) +
-  theme(
-    strip.background = element_rect(fill = "white"),
-    axis.text.y = element_text(size = 10),
-    panel.grid = element_blank()
-  )
-
-fig5
-
-ggsave("Figure_5.png", plot = fig5,
-       width = 8, height = 4, dpi = 300, units = "in")
